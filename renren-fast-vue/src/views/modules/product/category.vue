@@ -8,6 +8,9 @@
       show-checkbox
       node-key="catId"
       :default-expanded-keys="expandedKey"
+      draggable
+      :allow-drop="allowDrop"
+      @node-drop="handleDrop"
     >
       <span class="custom-tree-node" slot-scope="{ node, data }">
         <span>{{ node.label }}</span>
@@ -19,6 +22,9 @@
             @click="() => append(data)"
           >
             Append
+          </el-button>
+          <el-button type="text" size="mini" @click="() => edit(data)">
+            Edit
           </el-button>
           <el-button
             v-if="node.childNodes.length == 0"
@@ -32,15 +38,29 @@
       </span>
     </el-tree>
 
-    <el-dialog title="提示" :visible.sync="dialogVisible" width="30%">
+    <el-dialog
+      :title="title"
+      :visible.sync="dialogVisible"
+      width="30%"
+      :close-on-click-modal="false"
+    >
       <el-form :model="category">
         <el-form-item label="分类名称">
           <el-input v-model="category.name" autocomplete="off"></el-input>
         </el-form-item>
+        <el-form-item label="图标">
+          <el-input v-model="category.icon" autocomplete="off"></el-input>
+        </el-form-item>
+        <el-form-item label="计量单位">
+          <el-input
+            v-model="category.productUnit"
+            autocomplete="off"
+          ></el-input>
+        </el-form-item>
       </el-form>
       <span slot="footer" class="dialog-footer">
         <el-button @click="dialogVisible = false">取 消</el-button>
-        <el-button type="primary" @click="addCategory">确 定</el-button>
+        <el-button type="primary" @click="submitData">确 定</el-button>
       </span>
     </el-dialog>
   </div>
@@ -55,7 +75,20 @@ export default {
   components: {},
   data() {
     return {
-      category: { name: "", parentCid: 0, catLevel: 0, showStatus: 1, sort: 0 },
+      updateNodes: [],
+      maxLevel: 0,
+      title: "",
+      dialogType: "", // edit/add
+      category: {
+        name: "",
+        parentCid: 0,
+        catLevel: 0,
+        showStatus: 1,
+        sort: 0,
+        catId: null,
+        productUnit: "",
+        icon: "",
+      },
       dialogVisible: false,
       menus: [],
       expandedKey: [],
@@ -77,13 +110,53 @@ export default {
         this.menus = data.data;
       });
     },
-    //
+    //添加节点
     append(data) {
       console.log("append", data);
       this.dialogVisible = true;
       // this.category.name = "";
+      this.title = "添加分类";
+      this.dialogType = "add";
       this.category.parentCid = data.catId;
       this.category.catLevel = data.catLevel * 1 + 1;
+      this.category.catId = null;
+      this.category.name = "";
+      this.category.icon = "";
+      this.category.productUnit = "";
+      this.category.sort = 0;
+      this.category.showStatus = 1;
+    },
+    //修改节点
+    edit(data) {
+      console.log("修改数据", data);
+      this.dialogVisible = true;
+      this.title = "修改分类";
+      this.dialogType = "edit";
+      //发送请求获取当前节点最新的数据
+      this.$http({
+        url: this.$http.adornUrl(`/product/category/info/${data.catId}`),
+        method: "get",
+      }).then(({ data }) => {
+        console.log("回显的数据", data);
+        this.category.name = data.data.name;
+        this.category.catId = data.data.catId;
+        this.category.icon = data.data.icon;
+        this.category.productUnit = data.data.productUnit;
+        this.category.parentCid = data.data.parentCid;
+        this.category.sort = data.data.sort;
+        this.category.catLevel = data.data.catLevel;
+        this.category.showStatus = data.data.showStatus;
+      });
+    },
+    //
+    submitData() {
+      if (this.dialogType == "add") {
+        console.log("添加操作");
+        this.addCategory();
+      } else if (this.dialogType == "edit") {
+        console.log("修改操作");
+        this.editCategory();
+      }
     },
     //添加三级分类的方法
     addCategory() {
@@ -108,7 +181,31 @@ export default {
         this.expandedKey = [this.category.parentCid];
       });
     },
-
+    //修改三级分类
+    editCategory() {
+      console.log("修改三级分类", this.category);
+      var { catId, name, icon, productUnit } = this.category;
+      var data = { catId, name, icon, productUnit };
+      this.$http({
+        url: this.$http.adornUrl("/product/category/update"),
+        method: "post",
+        data: this.$http.adornParams(data, false),
+      }).then(({ data }) => {
+        this.$message({
+          type: "success",
+          message: "菜单修改成功!",
+        });
+        //关闭对话框
+        this.dialogVisible = false;
+        //清空输入框
+        this.category.name = "";
+        //刷新出新的菜单
+        this.getMenus();
+        //设置需要默认展开的菜单
+        this.expandedKey = [this.category.parentCid];
+      });
+    },
+    //删除节点
     remove(node, data) {
       var ids = [data.catId];
       this.$confirm(`是否删除【${data.name}】菜单, 是否继续?`, "提示", {
@@ -135,6 +232,80 @@ export default {
         .catch(() => {});
       console.log("remove", node, data);
     },
+    //拖拽
+    allowDrop(draggingNode, dropNode, type) {
+      //1.被拖动的当前节点以及所在的父节点总层数不能大于3
+      //1.1被拖动节点总层数
+      this.countNodeLevel(draggingNode.data);
+      //当前正在拖动的节点+父节点所在的深度不大于3即可
+      var deep = this.maxLevel - draggingNode.data.catLevel + 1;
+      if (type == "inner") {
+        return deep + dropNode.level <= 3;
+      } else {
+        return deep + dropNode.parent.level <= 3;
+      }
+    },
+    //总层数
+    countNodeLevel(node) {
+      //找到所有子节点，求出最大深度
+      if (node.children != null && node.children.length > 0) {
+        for (let i = 0; i < node.children.length; i++) {
+          if (node.children[i].catLevel > this.maxLevel) {
+            this.maxLevel = node.children[i].catLevel;
+          }
+          this.countNodeLevel(node.children[i]);
+        }
+      }
+    },
+    handleDrop(draggingNode, dropNode, dropType, ev) {
+      console.log("tree drop: ", dropNode.label, dropType);
+      //1.当前节点最新的父节点id
+      let pCid = 0;
+      let siblings = null;
+      if (dropType == "before" || dropType == "after") {
+        pCid =
+          dropNode.parent.data.catId == undefined
+            ? 0
+            : dropNode.parent.data.catId;
+        siblings = dropNode.parent.childNodes;
+      } else {
+        pCid = dropNode.data.catId;
+        siblings = dropNode.childNodes;
+      }
+      //2.当前拖拽节点的最新顺序
+      for (let i = 0; i < siblings.length; i++) {
+        if (siblings[i].data.catId == draggingNode.data.catId) {
+          //如果遍历的是当前正在拖拽的节点
+          let catLevel = draggingNode.level;
+          if (siblings[i].level != draggingNode.level) {
+            //当前节点的层级发生变化
+            catLevel = siblings[i].level;
+             //修改子节点的层级
+            this.updateChildNodeLevel(siblings[i]);
+
+          }
+          this.updateNodes.push({
+            catId: siblings[i].data.catId,
+            sort: i,
+            parentCid: pCid,
+            catLevel: catLevel
+          });
+        } else {
+          this.updateNodes.push({ catId: siblings[i].data.catId, sort: i });
+        }
+      }
+      //3.当前拖拽节点的最新层级
+    },
+    //更改子节点的层级
+    updateChildNodeLevel(node){ 
+      if(node.childNodes.length > 0){ 
+        for(let i=0;i<node.childNodes.length;i++){ 
+          var cNode = node.childNodes[i].data;
+          this.updateNodes.push({catId:cNode.catId,catLevel:node.childNodes[i].level});
+          this.updateChildNodeLevel(node.childNodes[i]);
+        }
+      }
+    }
   },
   //监听属性 类似于data概念
   computed: {},
